@@ -69,6 +69,7 @@ exports.docs = docs
 
 const messageSync = 0
 const messageAwareness = 1
+const messageCrypto = 4
 // const messageAuth = 2
 
 /**
@@ -165,9 +166,15 @@ const messageListener = (conn, doc, message) => {
     const decoder = decoding.createDecoder(message)
     const messageType = decoding.readVarUint(decoder)
     switch (messageType) {
+      case messageCrypto:
+        encoding.writeVarUint(encoder, messageCrypto)
+        doc.conns.forEach((_, conn) => send(doc, conn, message))
+        break
       case messageSync:
         encoding.writeVarUint(encoder, messageSync)
         syncProtocol.readSyncMessage(decoder, encoder, doc, null)
+
+
 
         // If the `encoder` only contains the type of reply message and no
         // message, there is no need to send the message. When `encoder` only
