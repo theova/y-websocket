@@ -97,6 +97,8 @@ class WSSharedDoc extends Y.Doc {
      * @type {Map<Object, Set<number>>}
      */
     this.conns = new Map()
+
+    this.messageHistory = []
     /**
      * @type {awarenessProtocol.Awareness}
      */
@@ -167,6 +169,7 @@ const messageListener = (conn, doc, message) => {
     const messageType = decoding.readVarUint(decoder)
     switch (messageType) {
       case messageCrypto:
+        doc.messageHistory.push(message)
         encoding.writeVarUint(encoder, messageCrypto)
         doc.conns.forEach((_, conn) => send(doc, conn, message))
         break
@@ -290,4 +293,6 @@ exports.setupWSConnection = (conn, req, { docName = req.url.slice(1).split('?')[
       send(doc, conn, encoding.toUint8Array(encoder))
     }
   }
+
+  doc.messageHistory.forEach(message => {send(doc, conn, message)})
 }
