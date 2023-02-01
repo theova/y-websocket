@@ -100,7 +100,8 @@ exports.docs = docs
 
 const messageSync = 0
 const messageAwareness = 1
-const messageCrypto = 4
+const messageCrypto = 100
+const messageFullCrypto = 101
 // const messageAuth = 2
 
 /**
@@ -203,6 +204,10 @@ const messageListener = (conn, doc, message) => {
     const decoder = decoding.createDecoder(message)
     const messageType = decoding.readVarUint(decoder)
     switch (messageType) {
+      case messageFullCrypto:
+        console.log("📜 Get full update")
+        doc.messageHistory = []
+        // no break to read it as normal encrypted message!
       case messageCrypto:
         doc.messageHistory.push(message)
         console.log("📥️ Push message " + (doc.messageHistory.length - 1) + ": " + message.slice(0,4))
