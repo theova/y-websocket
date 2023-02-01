@@ -1,3 +1,5 @@
+const fs = require('fs');
+
 const Y = require('yjs')
 const syncProtocol = require('y-protocols/dist/sync.cjs')
 const awarenessProtocol = require('y-protocols/dist/awareness.cjs')
@@ -25,26 +27,55 @@ const persistenceDir = process.env.YPERSISTENCE
 /**
  * @type {{bindState: function(string,WSSharedDoc):void, writeState:function(string,WSSharedDoc):Promise<any>, provider: any}|null}
  */
+
 let persistence = null
 if (typeof persistenceDir === 'string') {
   console.info('Persisting documents to "' + persistenceDir + '"')
-  // @ts-ignore
-  const LeveldbPersistence = require('y-leveldb').LeveldbPersistence
-  const ldb = new LeveldbPersistence(persistenceDir)
   persistence = {
-    provider: ldb,
-    bindState: async (docName, ydoc) => {
-      const persistedYdoc = await ldb.getYDoc(docName)
-      const newUpdates = Y.encodeStateAsUpdate(ydoc)
-      ldb.storeUpdate(docName, newUpdates)
-      Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(persistedYdoc))
-      ydoc.on('update', update => {
-        ldb.storeUpdate(docName, update)
-      })
+    writeState: async (docName, ydoc) => {
+      const filepath= persistenceDir +"/" + docName
+      console.log("📝 Write to disk " + filepath)
+      var file = fs.createWriteStream(filepath)
+      file.write(serializeHistory(ydoc.messageHistory))
+      file.end()
     },
-    writeState: async (docName, ydoc) => {}
+    readState: (docName) => {
+      const filepath= persistenceDir +"/" + docName
+      console.log("📄 Read from disk " + filepath)
+      if (fs.existsSync(filepath)) {
+        return deserializeHistory(fs.readFileSync(filepath))
+      }
+      return null
+    }
   }
 }
+
+/**
+ * @param {messageHistory} Array
+ * @return {string}
+ */
+function serializeHistory(messageHistory) {
+  var serialized = []
+  for (let elem of messageHistory) {
+    serialized.push( Buffer.from(elem).toString('base64'))
+  }
+
+  return JSON.stringify(serialized)
+}
+
+/**
+ * @param {messageHistory} Array
+ * @return {string}
+ */
+function deserializeHistory(serialized) {
+  var deserialized = []
+  for (let elem of JSON.parse(serialized)) {
+    deserialized.push(new Uint8Array(Buffer.from(elem, "base64")))
+  }
+
+  return deserialized
+}
+
 
 /**
  * @param {{bindState: function(string,WSSharedDoc):void,
@@ -78,6 +109,7 @@ const messageCrypto = 4
  * @param {WSSharedDoc} doc
  */
 const updateHandler = (update, origin, doc) => {
+  console.log("UpdateHandler" + update)
   const encoder = encoding.createEncoder()
   encoding.writeVarUint(encoder, messageSync)
   syncProtocol.writeUpdate(encoder, update)
@@ -149,7 +181,10 @@ const getYDoc = (docname, gc = true) => map.setIfUndefined(docs, docname, () => 
   const doc = new WSSharedDoc(docname)
   doc.gc = gc
   if (persistence !== null) {
-    persistence.bindState(docname, doc)
+    const messageHistory = persistence.readState(docname)
+    if (messageHistory) {
+      doc.messageHistory = messageHistory
+    }
   }
   docs.set(docname, doc)
   return doc
@@ -170,10 +205,12 @@ const messageListener = (conn, doc, message) => {
     switch (messageType) {
       case messageCrypto:
         doc.messageHistory.push(message)
+        console.log("📥️ Push message " + (doc.messageHistory.length - 1) + ": " + message.slice(0,4))
         encoding.writeVarUint(encoder, messageCrypto)
         doc.conns.forEach((_, conn) => send(doc, conn, message))
         break
       case messageSync:
+        console.log("ℹ️  messageSync")
         encoding.writeVarUint(encoder, messageSync)
         syncProtocol.readSyncMessage(decoder, encoder, doc, null)
 
@@ -187,6 +224,7 @@ const messageListener = (conn, doc, message) => {
         }
         break
       case messageAwareness: {
+        // console.log("ℹ️  Awareness")
         awarenessProtocol.applyAwarenessUpdate(doc.awareness, decoding.readVarUint8Array(decoder), conn)
         break
       }
@@ -202,6 +240,7 @@ const messageListener = (conn, doc, message) => {
  * @param {any} conn
  */
 const closeConn = (doc, conn) => {
+  console.log("🚮 Close connection ")
   if (doc.conns.has(conn)) {
     /**
      * @type {Set<number>}
@@ -245,6 +284,7 @@ const pingTimeout = 30000
  * @param {any} opts
  */
 exports.setupWSConnection = (conn, req, { docName = req.url.slice(1).split('?')[0], gc = true } = {}) => {
+  console.log("🆕 New connection")
   conn.binaryType = 'arraybuffer'
   // get doc, initialize if it does not exist yet
   const doc = getYDoc(docName, gc)
@@ -281,10 +321,10 @@ exports.setupWSConnection = (conn, req, { docName = req.url.slice(1).split('?')[
   // scope
   {
     // send sync step 1
-    const encoder = encoding.createEncoder()
-    encoding.writeVarUint(encoder, messageSync)
-    syncProtocol.writeSyncStep1(encoder, doc)
-    send(doc, conn, encoding.toUint8Array(encoder))
+    // const encoder = encoding.createEncoder()
+    // encoding.writeVarUint(encoder, messageSync)
+    // syncProtocol.writeSyncStep1(encoder, doc)
+    // send(doc, conn, encoding.toUint8Array(encoder))
     const awarenessStates = doc.awareness.getStates()
     if (awarenessStates.size > 0) {
       const encoder = encoding.createEncoder()
@@ -294,5 +334,10 @@ exports.setupWSConnection = (conn, req, { docName = req.url.slice(1).split('?')[
     }
   }
 
-  doc.messageHistory.forEach(message => {send(doc, conn, message)})
+  var i = 0
+  doc.messageHistory.forEach(message => {
+    send(doc, conn, message)
+    console.log("📤️ Send message " + (i++) + ": " + message.slice(0,4))
+  }
+  )
 }
