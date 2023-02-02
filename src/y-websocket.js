@@ -256,7 +256,7 @@ const setupWS = (provider) => {
         websocket.send(encoding.toUint8Array(encrypted))
       }
       // broadcast local awareness state
-      if (provider.awareness.getLocalState() !== null) {
+      if (provider.awareness.getLocalState() !== null && provider.canEncrypt) {
         const encoderAwarenessState = encoding.createEncoder()
         encoding.writeVarUint(encoderAwarenessState, messageAwareness)
         encoding.writeVarUint8Array(
@@ -265,7 +265,9 @@ const setupWS = (provider) => {
             provider.doc.clientID
           ])
         )
-        websocket.send(encoding.toUint8Array(encoderAwarenessState))
+
+        const encrypted = provider.encryptInner( encoderAwarenessState )
+        websocket.send(encoding.toUint8Array(encrypted))
       }
     }
 
@@ -467,13 +469,17 @@ export class WebsocketProvider extends Observable {
      */
     this._awarenessUpdateHandler = ({ added, updated, removed }, _origin) => {
       const changedClients = added.concat(updated).concat(removed)
-      const encoder = encoding.createEncoder()
-      encoding.writeVarUint(encoder, messageAwareness)
-      encoding.writeVarUint8Array(
-        encoder,
-        awarenessProtocol.encodeAwarenessUpdate(awareness, changedClients)
-      )
-      broadcastMessage(this, encoding.toUint8Array(encoder))
+      if(this.canEncrypt) {
+        const encoder = encoding.createEncoder()
+        encoding.writeVarUint(encoder, messageAwareness)
+        encoding.writeVarUint8Array(
+          encoder,
+          awarenessProtocol.encodeAwarenessUpdate(awareness, changedClients)
+        )
+
+        const encrypted = this.encryptInner(encoder)
+        broadcastMessage(this, encoding.toUint8Array(encrypted))
+      }
     }
     this._unloadHandler = () => {
       awarenessProtocol.removeAwarenessStates(
@@ -570,33 +576,42 @@ export class WebsocketProvider extends Observable {
       encoding.toUint8Array(encoderAwarenessQuery),
       this
     )
-    // broadcast local awareness state
-    const encoderAwarenessState = encoding.createEncoder()
-    encoding.writeVarUint(encoderAwarenessState, messageAwareness)
-    encoding.writeVarUint8Array(
-      encoderAwarenessState,
-      awarenessProtocol.encodeAwarenessUpdate(this.awareness, [
-        this.doc.clientID
-      ])
-    )
-    bc.publish(
-      this.bcChannel,
-      encoding.toUint8Array(encoderAwarenessState),
-      this
-    )
+
+    if(this.canEncrypt){
+      // broadcast local awareness state
+      const encoderAwarenessState = encoding.createEncoder()
+      encoding.writeVarUint(encoderAwarenessState, messageAwareness)
+      encoding.writeVarUint8Array(
+        encoderAwarenessState,
+        awarenessProtocol.encodeAwarenessUpdate(this.awareness, [
+          this.doc.clientID
+        ])
+      )
+      const encrypted = this.encryptInner(encoderAwarenessState)
+
+      bc.publish(
+        this.bcChannel,
+        encoding.toUint8Array(encrypted),
+        this
+      )
+    }
   }
 
   disconnectBc () {
     // broadcast message with local awareness state set to null (indicating disconnect)
-    const encoder = encoding.createEncoder()
-    encoding.writeVarUint(encoder, messageAwareness)
-    encoding.writeVarUint8Array(
-      encoder,
-      awarenessProtocol.encodeAwarenessUpdate(this.awareness, [
-        this.doc.clientID
-      ], new Map())
-    )
-    broadcastMessage(this, encoding.toUint8Array(encoder))
+    if(this.canEncrypt){
+      const encoder = encoding.createEncoder()
+      encoding.writeVarUint(encoder, messageAwareness)
+      encoding.writeVarUint8Array(
+        encoder,
+        awarenessProtocol.encodeAwarenessUpdate(this.awareness, [
+          this.doc.clientID
+        ], new Map())
+      )
+
+      const encrypted = this.encryptInner(encoder)
+      broadcastMessage(this, encoding.toUint8Array(encrypted))
+    }
     if (this.bcconnected) {
       bc.unsubscribe(this.bcChannel, this._bcSubscriber)
       this.bcconnected = false

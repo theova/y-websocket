@@ -241,7 +241,7 @@ const messageListener = (conn, doc, message) => {
         break
       case messageAwareness: {
         // console.log("ℹ️  Awareness")
-        awarenessProtocol.applyAwarenessUpdate(doc.awareness, decoding.readVarUint8Array(decoder), conn)
+        doc.conns.forEach((_, conn) => send(doc, conn, message)) // broadcast it
         break
       }
     }
