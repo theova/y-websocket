@@ -22,9 +22,10 @@ export const messageSync = 0
 export const messageQueryAwareness = 3
 export const messageAwareness = 1
 export const messageAuth = 2
-export const messageFull = 10
-export const messageCrypto = 100
-export const messageFullCrypto = 101
+
+export const messageFull = 10 // inner type for full states
+export const messageCrypto = 100 // outer type for general encrypted updates
+export const messageFullCrypto = 101 // otuer type for encrypted ful updates
 
 export const threasholdFullUpdates = 50 // Send a full update after these messages
 
@@ -58,14 +59,14 @@ messageHandlers[messageSync] = (
 
 messageHandlers[messageFull] =
   (
-    encoder,
+    _encoder,
     decoder,
     provider,
-    emitSynced,
+    _emitSynced,
     _messageType
   ) => {
-    const diff = decoding.readVarUint8Array(decoder)
-    Y.applyUpdate(provider.doc, diff)
+    const state = decoding.readVarUint8Array(decoder)
+    Y.applyUpdate(provider.doc, state) // apply full state update
     provider.synced = true
   }
 
@@ -125,6 +126,8 @@ const permissionDeniedHandler = (provider, reason) =>
   console.warn(`Permission denied to access ${provider.url}.\n${reason}`)
 
 /**
+ * Preprocess a potentially encrypted message
+ *
  * @param {WebsocketProvider} provider
  * @param {Uint8Array} buf
  * @return {Uint8Array}
@@ -132,27 +135,26 @@ const permissionDeniedHandler = (provider, reason) =>
 const preprocessMessage = (provider, buf) => {
   const decoder = decoding.createDecoder(buf)
   const OuterMessageType = decoding.readVarUint(decoder)
-  // console.log('receive ' + OuterMessageType)
+
+  // if it is encrypted, then we need to decrypt it
   if (OuterMessageType === messageCrypto || OuterMessageType === messageFullCrypto) {
-    // read
     const validateKey = Crypto.Nacl.util.decodeBase64(provider.cryptor.validateKey)
-    const signedCiphertext = decoding.readUint8Array(decoder)
-    console.log(signedCiphertext)
+    const signedCiphertext = decoding.readVarUint8Array(decoder)
     const ciphertext = Crypto.Nacl.sign.open(signedCiphertext, validateKey)
     if (!ciphertext) {
-      console.log('Buffer: ' + buf)
-      console.log('Message Type ' + OuterMessageType)
-      console.log('NULL')
-      console.log(signedCiphertext)
-      return null
+      console.error("Could not validate signature")
+      return new Uint8Array()
     }
 
     // decrypt
     const encoded = Crypto.Nacl.util.encodeUTF8(ciphertext)
-    buf = Crypto.decrypt(encoded, provider.cryptor.cryptKey)
-    const processedBuf = new Uint8Array(buf.replace(/, +/g, ',').split(',').map(Number))
+    const decrypted = Crypto.decrypt(encoded, provider.cryptor.cryptKey)
+    const processedBuf = new Uint8Array(decrypted.replace(/, +/g, ',').split(',').map(Number))
+
     return processedBuf
-  } else {
+
+
+  } else {// otherwise, we do not need that...
     return buf
   }
 }
@@ -165,14 +167,14 @@ const preprocessMessage = (provider, buf) => {
  */
 const readMessage = (provider, buf, emitSynced) => {
   buf = preprocessMessage(provider, buf)
-  if (buf === null) {
+  if (buf === null || buf.length === 0) {
+    // we could not preprocess the message, ignore it
+    console.error("Could not preprocess message")
     return encoding.createEncoder()
   }
   const decoder = decoding.createDecoder(buf)
   const encoder = encoding.createEncoder()
   const messageType = decoding.readVarUint(decoder)
-  // console.log('Read message ' + messageType)
-
   const messageHandler = provider.messageHandlers[messageType]
   if (/** @type {any} */ (messageHandler)) {
     messageHandler(encoder, decoder, provider, emitSynced, messageType)
@@ -280,11 +282,9 @@ const setupWS = (provider) => {
 const broadcastMessage = (provider, buf) => {
   if (provider.wsconnected) {
     /** @type {WebSocket} */ (provider.ws).send(buf)
-    // console.log('send over wsconnected')
   }
   if (provider.bcconnected) {
     bc.publish(provider.bcChannel, buf, provider)
-    // console.log('send over bcpublish')
   }
 }
 
@@ -314,6 +314,7 @@ export class WebsocketProvider extends Observable {
    * @param {number} [opts.resyncInterval] Request server state every `resyncInterval` milliseconds
    * @param {number} [opts.maxBackoffTime] Maximum amount of time to wait before trying to reconnect (we try to reconnect using exponential backoff)
    * @param {boolean} [opts.disableBc] Disable cross-tab BroadcastChannel communication
+   * @param {any} [opts.cryptor] Either an EditCryptor2 or a ViewCryptor2
    */
   constructor (serverUrl, roomname, doc, {
     connect = true,
@@ -399,11 +400,12 @@ export class WebsocketProvider extends Observable {
      * @param {encoding.Encoder} encoder
      * @return {encoding.Encoder}
      */
-    this.encryptInner = (encoder, outerMessageType) => {
+    this.encryptInner = (encoder, outerMessageType = messageCrypto) => {
       const result = encoding.createEncoder()
+
       if (!this.canEncrypt) {
-        console.log('no signKey')
-        return null
+        console.error('Cannot encryptInner without signKey')
+        return result // empty
       }
 
       // Encrypt and write update
@@ -413,7 +415,6 @@ export class WebsocketProvider extends Observable {
       const signedCiphertext = Crypto.Nacl.sign(message, signKey)
 
       // Write outer metadata
-      outerMessageType = outerMessageType || messageCrypto
       encoding.writeVarUint(result, outerMessageType)
 
       // Write data
@@ -445,6 +446,9 @@ export class WebsocketProvider extends Observable {
       }
     }
 
+    /**
+     * Send a message that contains the entire document
+     */
     this.sendFullState = () => {
       const encoder = encoding.createEncoder()
       encoding.writeVarUint(encoder, messageFull)

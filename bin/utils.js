@@ -50,31 +50,6 @@ if (typeof persistenceDir === 'string') {
   }
 }
 
-/**
- * @param {messageHistory} Array
- * @return {string}
- */
-function serializeHistory(messageHistory) {
-  var serialized = []
-  for (let elem of messageHistory) {
-    serialized.push( Buffer.from(elem).toString('base64'))
-  }
-
-  return JSON.stringify(serialized)
-}
-
-/**
- * @param {messageHistory} Array
- * @return {string}
- */
-function deserializeHistory(serialized) {
-  var deserialized = []
-  for (let elem of JSON.parse(serialized)) {
-    deserialized.push(new Uint8Array(Buffer.from(elem, "base64")))
-  }
-
-  return deserialized
-}
 
 
 /**
@@ -92,6 +67,37 @@ exports.setPersistence = persistence_ => {
 exports.getPersistence = () => persistence
 
 /**
+ * Serialize the messageHistory (Array of Uint8Array) to string by using base64
+ * encoding
+ *
+ * @param {messageHistory} Array
+ * @return {string}
+ */
+function serializeHistory(messageHistory) {
+  var serialized = []
+  for (let elem of messageHistory) {
+    serialized.push( Buffer.from(elem).toString('base64'))
+  }
+
+  return JSON.stringify(serialized)
+}
+
+/**
+ * Derialize the serialized messageHistory to an Array of Uint8Array by using
+ * base64 encoding
+ * @param {messageHistory} Array
+ * @return {string}
+ */
+function deserializeHistory(serialized) {
+  var deserialized = []
+  for (let elem of JSON.parse(serialized)) {
+    deserialized.push(new Uint8Array(Buffer.from(elem, "base64")))
+  }
+
+  return deserialized
+}
+
+/**
  * @type {Map<string,WSSharedDoc>}
  */
 const docs = new Map()
@@ -105,11 +111,13 @@ const messageFullCrypto = 101
 // const messageAuth = 2
 
 /**
+ * Note that this function will not be called when encryption is used.
+ *
  * @param {Uint8Array} update
  * @param {any} origin
  * @param {WSSharedDoc} doc
  */
-const updateHandler = (update, origin, doc) => {
+const updateHandler = (update, _origin, doc) => {
   console.log("UpdateHandler" + update)
   const encoder = encoding.createEncoder()
   encoding.writeVarUint(encoder, messageSync)
@@ -183,7 +191,7 @@ const getYDoc = (docname, gc = true) => map.setIfUndefined(docs, docname, () => 
   doc.gc = gc
   if (persistence !== null) {
     const messageHistory = persistence.readState(docname)
-    if (messageHistory) {
+    if (messageHistory) { // check if we could read the state from disk
       doc.messageHistory = messageHistory
     }
   }
@@ -204,22 +212,25 @@ const messageListener = (conn, doc, message) => {
     const decoder = decoding.createDecoder(message)
     const messageType = decoding.readVarUint(decoder)
     switch (messageType) {
+      // If we get the encrypted full state, then reset the history
+      // Todo: The server should check if this is value or not
       case messageFullCrypto:
         console.log("📜 Get full update")
         doc.messageHistory = []
         // no break to read it as normal encrypted message!
       case messageCrypto:
-        doc.messageHistory.push(message)
-        console.log("📥️ Push message " + (doc.messageHistory.length - 1) + ": " + message.slice(0,4))
+        doc.messageHistory.push(message) // stora the message
+        console.log(
+          "📥️ Push message "
+          + (doc.messageHistory.length - 1) + ": " + message.slice(0,4)
+        )
         encoding.writeVarUint(encoder, messageCrypto)
-        doc.conns.forEach((_, conn) => send(doc, conn, message))
+        doc.conns.forEach((_, conn) => send(doc, conn, message)) // broadcast it
         break
       case messageSync:
         console.log("ℹ️  messageSync")
         encoding.writeVarUint(encoder, messageSync)
         syncProtocol.readSyncMessage(decoder, encoder, doc, null)
-
-
 
         // If the `encoder` only contains the type of reply message and no
         // message, there is no need to send the message. When `encoder` only
@@ -325,11 +336,6 @@ exports.setupWSConnection = (conn, req, { docName = req.url.slice(1).split('?')[
   // put the following in a variables in a block so the interval handlers don't keep in in
   // scope
   {
-    // send sync step 1
-    // const encoder = encoding.createEncoder()
-    // encoding.writeVarUint(encoder, messageSync)
-    // syncProtocol.writeSyncStep1(encoder, doc)
-    // send(doc, conn, encoding.toUint8Array(encoder))
     const awarenessStates = doc.awareness.getStates()
     if (awarenessStates.size > 0) {
       const encoder = encoding.createEncoder()
