@@ -16,10 +16,17 @@ import { Observable } from 'lib0/observable'
 import * as math from 'lib0/math'
 import * as url from 'lib0/url'
 
+const Crypto = require('chainpad-crypto')
+
 export const messageSync = 0
 export const messageQueryAwareness = 3
 export const messageAwareness = 1
 export const messageAuth = 2
+export const messageFull = 10
+export const messageCrypto = 100
+export const messageFullCrypto = 101
+
+export const threasholdFullUpdates = 50 // Send a full update after these messages
 
 /**
  *                       encoder,          decoder,          provider,          emitSynced, messageType
@@ -48,6 +55,19 @@ messageHandlers[messageSync] = (
     provider.synced = true
   }
 }
+
+messageHandlers[messageFull] =
+  (
+    encoder,
+    decoder,
+    provider,
+    emitSynced,
+    _messageType
+  ) => {
+    const diff = decoding.readVarUint8Array(decoder)
+    Y.applyUpdate(provider.doc, diff)
+    provider.synced = true
+  }
 
 messageHandlers[messageQueryAwareness] = (
   encoder,
@@ -107,13 +127,52 @@ const permissionDeniedHandler = (provider, reason) =>
 /**
  * @param {WebsocketProvider} provider
  * @param {Uint8Array} buf
+ * @return {Uint8Array}
+ */
+const preprocessMessage = (provider, buf) => {
+  const decoder = decoding.createDecoder(buf)
+  const OuterMessageType = decoding.readVarUint(decoder)
+  // console.log('receive ' + OuterMessageType)
+  if (OuterMessageType === messageCrypto || OuterMessageType === messageFullCrypto) {
+    // read
+    const validateKey = Crypto.Nacl.util.decodeBase64(provider.cryptor.validateKey)
+    const signedCiphertext = decoding.readUint8Array(decoder)
+    console.log(signedCiphertext)
+    const ciphertext = Crypto.Nacl.sign.open(signedCiphertext, validateKey)
+    if (!ciphertext) {
+      console.log('Buffer: ' + buf)
+      console.log('Message Type ' + OuterMessageType)
+      console.log('NULL')
+      console.log(signedCiphertext)
+      return null
+    }
+
+    // decrypt
+    const encoded = Crypto.Nacl.util.encodeUTF8(ciphertext)
+    buf = Crypto.decrypt(encoded, provider.cryptor.cryptKey)
+    const processedBuf = new Uint8Array(buf.replace(/, +/g, ',').split(',').map(Number))
+    return processedBuf
+  } else {
+    return buf
+  }
+}
+
+/**
+ * @param {WebsocketProvider} provider
+ * @param {Uint8Array} buf
  * @param {boolean} emitSynced
  * @return {encoding.Encoder}
  */
 const readMessage = (provider, buf, emitSynced) => {
+  buf = preprocessMessage(provider, buf)
+  if (buf === null) {
+    return encoding.createEncoder()
+  }
   const decoder = decoding.createDecoder(buf)
   const encoder = encoding.createEncoder()
   const messageType = decoding.readVarUint(decoder)
+  // console.log('Read message ' + messageType)
+
   const messageHandler = provider.messageHandlers[messageType]
   if (/** @type {any} */ (messageHandler)) {
     messageHandler(encoder, decoder, provider, emitSynced, messageType)
@@ -138,8 +197,9 @@ const setupWS = (provider) => {
     websocket.onmessage = (event) => {
       provider.wsLastMessageReceived = time.getUnixTime()
       const encoder = readMessage(provider, new Uint8Array(event.data), true)
-      if (encoding.length(encoder) > 1) {
-        websocket.send(encoding.toUint8Array(encoder))
+      if (encoding.length(encoder) > 1 && provider.canEncrypt) {
+        const encrypted = provider.encryptInner(encoder)
+        websocket.send(encoding.toUint8Array(encrypted))
       }
     }
     websocket.onerror = (event) => {
@@ -185,11 +245,14 @@ const setupWS = (provider) => {
       provider.emit('status', [{
         status: 'connected'
       }])
+      if (provider.canEncrypt) {
       // always send sync step 1 when connected
-      const encoder = encoding.createEncoder()
-      encoding.writeVarUint(encoder, messageSync)
-      syncProtocol.writeSyncStep1(encoder, provider.doc)
-      websocket.send(encoding.toUint8Array(encoder))
+        const encoder = encoding.createEncoder()
+        encoding.writeVarUint(encoder, messageSync)
+        syncProtocol.writeSyncStep1(encoder, provider.doc)
+        const encrypted = provider.encryptInner(encoder)
+        websocket.send(encoding.toUint8Array(encrypted))
+      }
       // broadcast local awareness state
       if (provider.awareness.getLocalState() !== null) {
         const encoderAwarenessState = encoding.createEncoder()
@@ -217,9 +280,11 @@ const setupWS = (provider) => {
 const broadcastMessage = (provider, buf) => {
   if (provider.wsconnected) {
     /** @type {WebSocket} */ (provider.ws).send(buf)
+    // console.log('send over wsconnected')
   }
   if (provider.bcconnected) {
     bc.publish(provider.bcChannel, buf, provider)
+    // console.log('send over bcpublish')
   }
 }
 
@@ -257,7 +322,8 @@ export class WebsocketProvider extends Observable {
     WebSocketPolyfill = WebSocket,
     resyncInterval = -1,
     maxBackoffTime = 2500,
-    disableBc = false
+    disableBc = false,
+    cryptor = null
   } = {}) {
     super()
     // ensure that url is always ends with /
@@ -271,6 +337,8 @@ export class WebsocketProvider extends Observable {
       (encodedParams.length === 0 ? '' : '?' + encodedParams)
     this.roomname = roomname
     this.doc = doc
+    this.cryptor = cryptor
+    this.canEncrypt = (typeof cryptor.signKey !== 'undefined')
     this._WS = WebSocketPolyfill
     this.awareness = awareness
     this.wsconnected = false
@@ -279,6 +347,7 @@ export class WebsocketProvider extends Observable {
     this.disableBc = disableBc
     this.wsUnsuccessfulReconnects = 0
     this.messageHandlers = messageHandlers.slice()
+    this.nUpdates = 0
     /**
      * @type {boolean}
      */
@@ -300,12 +369,14 @@ export class WebsocketProvider extends Observable {
     this._resyncInterval = 0
     if (resyncInterval > 0) {
       this._resyncInterval = /** @type {any} */ (setInterval(() => {
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN && this.canEncrypt) {
           // resend sync step 1
           const encoder = encoding.createEncoder()
           encoding.writeVarUint(encoder, messageSync)
           syncProtocol.writeSyncStep1(encoder, doc)
-          this.ws.send(encoding.toUint8Array(encoder))
+
+          const encrypted = this.encryptInner(encoder)
+          this.ws.send(encoding.toUint8Array(encrypted))
         }
       }, resyncInterval))
     }
@@ -315,6 +386,7 @@ export class WebsocketProvider extends Observable {
      * @param {any} origin
      */
     this._bcSubscriber = (data, origin) => {
+      // console.log('subsriber received')
       if (origin !== this) {
         const encoder = readMessage(this, new Uint8Array(data), false)
         if (encoding.length(encoder) > 1) {
@@ -322,19 +394,68 @@ export class WebsocketProvider extends Observable {
         }
       }
     }
+
+    /**
+     * @param {encoding.Encoder} encoder
+     * @return {encoding.Encoder}
+     */
+    this.encryptInner = (encoder, outerMessageType) => {
+      const result = encoding.createEncoder()
+      if (!this.canEncrypt) {
+        console.log('no signKey')
+        return null
+      }
+
+      // Encrypt and write update
+      const ciphertext = Crypto.encrypt(encoding.toUint8Array(encoder), this.cryptor.cryptKey)
+      const message = Crypto.Nacl.util.decodeUTF8(ciphertext)
+      const signKey = Crypto.Nacl.util.decodeBase64(this.cryptor.signKey)
+      const signedCiphertext = Crypto.Nacl.sign(message, signKey)
+
+      // Write outer metadata
+      outerMessageType = outerMessageType || messageCrypto
+      encoding.writeVarUint(result, outerMessageType)
+
+      // Write data
+      encoding.writeUint8Array(result, signedCiphertext)
+
+      return result
+    }
+
     /**
      * Listens to Yjs updates and sends them to remote peers (ws and broadcastchannel)
      * @param {Uint8Array} update
      * @param {any} origin
      */
     this._updateHandler = (update, origin) => {
-      if (origin !== this) {
+      if (origin !== this && this.canEncrypt) {
+        // Write inner metadata
         const encoder = encoding.createEncoder()
         encoding.writeVarUint(encoder, messageSync)
         syncProtocol.writeUpdate(encoder, update)
-        broadcastMessage(this, encoding.toUint8Array(encoder))
+
+        const result = this.encryptInner(encoder)
+        broadcastMessage(this, encoding.toUint8Array(result))
+        this.nUpdates++
+
+        if (this.nUpdates > threasholdFullUpdates) {
+          this.sendFullState()
+          this.nUpdates = 0
+        }
       }
     }
+
+    this.sendFullState = () => {
+      const encoder = encoding.createEncoder()
+      encoding.writeVarUint(encoder, messageFull)
+
+      const state = Y.encodeStateAsUpdate(this.doc)
+      encoding.writeVarUint8Array(encoder, state)
+
+      const encrypted = this.encryptInner(encoder, messageFullCrypto)
+      broadcastMessage(this, encoding.toUint8Array(encrypted))
+    }
+
     this.doc.on('update', this._updateHandler)
     /**
      * @param {any} changed
@@ -367,7 +488,7 @@ export class WebsocketProvider extends Observable {
       if (
         this.wsconnected &&
         messageReconnectTimeout <
-          time.getUnixTime() - this.wsLastMessageReceived
+        time.getUnixTime() - this.wsLastMessageReceived
       ) {
         // no message received in a long time - not even your own awareness
         // updates (which are updated every 15 seconds)
@@ -418,17 +539,25 @@ export class WebsocketProvider extends Observable {
       bc.subscribe(this.bcChannel, this._bcSubscriber)
       this.bcconnected = true
     }
+    if (this.canEncrypt) {
     // send sync step1 to bc
     // write sync step 1
-    const encoderSync = encoding.createEncoder()
-    encoding.writeVarUint(encoderSync, messageSync)
-    syncProtocol.writeSyncStep1(encoderSync, this.doc)
-    bc.publish(this.bcChannel, encoding.toUint8Array(encoderSync), this)
-    // broadcast local state
-    const encoderState = encoding.createEncoder()
-    encoding.writeVarUint(encoderState, messageSync)
-    syncProtocol.writeSyncStep2(encoderState, this.doc)
-    bc.publish(this.bcChannel, encoding.toUint8Array(encoderState), this)
+      const encoderSync = encoding.createEncoder()
+      encoding.writeVarUint(encoderSync, messageSync)
+      syncProtocol.writeSyncStep1(encoderSync, this.doc)
+
+      const encryptedSync = this.encryptInner(encoderSync)
+
+      bc.publish(this.bcChannel, encoding.toUint8Array(encryptedSync), this)
+      // broadcast local state
+      const encoderState = encoding.createEncoder()
+      encoding.writeVarUint(encoderState, messageSync)
+      syncProtocol.writeSyncStep2(encoderState, this.doc)
+
+      const encryptedState = this.encryptInner(encoderState)
+
+      bc.publish(this.bcChannel, encoding.toUint8Array(encryptedState), this)
+    }
     // write queryAwareness
     const encoderAwarenessQuery = encoding.createEncoder()
     encoding.writeVarUint(encoderAwarenessQuery, messageQueryAwareness)
