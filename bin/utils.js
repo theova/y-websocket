@@ -240,7 +240,7 @@ const messageListener = (conn, doc, message) => {
         }
         break
       case messageAwareness: {
-        // console.log("ℹ️  Awareness")
+        console.log("ℹ️  Awareness")
         doc.conns.forEach((_, conn) => send(doc, conn, message)) // broadcast it
         break
       }

@@ -139,10 +139,10 @@ const preprocessMessage = (provider, buf) => {
   // if it is encrypted, then we need to decrypt it
   if (OuterMessageType === messageCrypto || OuterMessageType === messageFullCrypto) {
     const validateKey = Crypto.Nacl.util.decodeBase64(provider.cryptor.validateKey)
-    const signedCiphertext = decoding.readVarUint8Array(decoder)
+    const signedCiphertext = decoding.readTailAsUint8Array(decoder)
     const ciphertext = Crypto.Nacl.sign.open(signedCiphertext, validateKey)
     if (!ciphertext) {
-      console.error("Could not validate signature")
+      console.error("Could not validate signature:")
       return new Uint8Array()
     }
 
@@ -389,7 +389,6 @@ export class WebsocketProvider extends Observable {
      * @param {any} origin
      */
     this._bcSubscriber = (data, origin) => {
-      // console.log('subsriber received')
       if (origin !== this) {
         const encoder = readMessage(this, new Uint8Array(data), false)
         if (encoding.length(encoder) > 1) {
