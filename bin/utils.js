@@ -106,9 +106,11 @@ exports.docs = docs
 
 const messageSync = 0
 const messageAwareness = 1
-const messageCrypto = 100
-const messageFullCrypto = 101
+const messageCrypto = 100 // outer type for general encrypted updates
+const messageAwarenessCrypto = 101 // outer type for encrypted awareness
+const messageFullCrypto = 110 // outer type for encrypted ful updates
 // const messageAuth = 2
+//
 
 /**
  * Note that this function will not be called when encryption is used.
@@ -218,15 +220,19 @@ const messageListener = (conn, doc, message) => {
         console.log("📜 Get full update")
         doc.messageHistory = []
         // no break to read it as normal encrypted message!
+
       case messageCrypto:
         doc.messageHistory.push(message) // stora the message
         console.log(
           "📥️ Push message "
           + (doc.messageHistory.length - 1) + ": " + message.slice(0,4)
         )
-        encoding.writeVarUint(encoder, messageCrypto)
+        // no break to send the message anyway
+
+      case messageAwarenessCrypto: // JUST FORWARD
         doc.conns.forEach((_, conn) => send(doc, conn, message)) // broadcast it
         break
+
       case messageSync:
         console.log("ℹ️  messageSync")
         encoding.writeVarUint(encoder, messageSync)

@@ -25,7 +25,14 @@ export const messageAuth = 2
 
 export const messageFull = 10 // inner type for full states
 export const messageCrypto = 100 // outer type for general encrypted updates
-export const messageFullCrypto = 101 // otuer type for encrypted ful updates
+export const messageAwarenessCrypto = 101 // outer type for encrypted awareness
+export const messageFullCrypto = 110 // outer type for encrypted ful updates
+
+export const messageTypesCrypto = [
+  messageCrypto,
+  messageAwarenessCrypto,
+  messageFullCrypto
+]
 
 export const threasholdFullUpdates = 50 // Send a full update after these messages
 
@@ -137,7 +144,7 @@ const preprocessMessage = (provider, buf) => {
   const OuterMessageType = decoding.readVarUint(decoder)
 
   // if it is encrypted, then we need to decrypt it
-  if (OuterMessageType === messageCrypto || OuterMessageType === messageFullCrypto) {
+  if (messageTypesCrypto.indexOf(OuterMessageType) >= 0) {
     const validateKey = Crypto.Nacl.util.decodeBase64(provider.cryptor.validateKey)
     const signedCiphertext = decoding.readTailAsUint8Array(decoder)
     const ciphertext = Crypto.Nacl.sign.open(signedCiphertext, validateKey)
@@ -476,7 +483,7 @@ export class WebsocketProvider extends Observable {
           awarenessProtocol.encodeAwarenessUpdate(awareness, changedClients)
         )
 
-        const encrypted = this.encryptInner(encoder)
+        const encrypted = this.encryptInner(encoder, messageAwarenessCrypto)
         broadcastMessage(this, encoding.toUint8Array(encrypted))
       }
     }
@@ -586,7 +593,9 @@ export class WebsocketProvider extends Observable {
           this.doc.clientID
         ])
       )
-      const encrypted = this.encryptInner(encoderAwarenessState)
+      const encrypted = this.encryptInner(
+        encoderAwarenessState, messageAwarenessCrypto
+      )
 
       bc.publish(
         this.bcChannel,
@@ -608,7 +617,7 @@ export class WebsocketProvider extends Observable {
         ], new Map())
       )
 
-      const encrypted = this.encryptInner(encoder)
+      const encrypted = this.encryptInner(encoder, messageAwarenessCrypto)
       broadcastMessage(this, encoding.toUint8Array(encrypted))
     }
     if (this.bcconnected) {
