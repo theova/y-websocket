@@ -24,6 +24,7 @@ export const messageAwareness = 1
 export const messageAuth = 2
 
 export const messageFull = 10 // inner type for full states
+export const messageValidateKey = 11 // inner type for the validateKey
 export const messageCrypto = 100 // outer type for general encrypted updates
 export const messageAwarenessCrypto = 101 // outer type for encrypted awareness
 export const messageFullCrypto = 110 // outer type for encrypted ful updates
@@ -145,13 +146,7 @@ const preprocessMessage = (provider, buf) => {
 
   // if it is encrypted, then we need to decrypt it
   if (messageTypesCrypto.indexOf(OuterMessageType) >= 0) {
-    const validateKey = Crypto.Nacl.util.decodeBase64(provider.cryptor.validateKey)
-    const signedCiphertext = decoding.readTailAsUint8Array(decoder)
-    const ciphertext = Crypto.Nacl.sign.open(signedCiphertext, validateKey)
-    if (!ciphertext) {
-      console.error("Could not validate signature:")
-      return new Uint8Array()
-    }
+    const ciphertext = decoding.readVarUint8Array(decoder)
 
     // decrypt
     const encoded = Crypto.Nacl.util.encodeUTF8(ciphertext)
@@ -255,26 +250,34 @@ const setupWS = (provider) => {
         status: 'connected'
       }])
       if (provider.canEncrypt) {
-      // always send sync step 1 when connected
+        // send validateKey to server
+        console.log("Send ValidateKey")
+        const validateKeyEncoder = encoding.createEncoder()
+        encoding.writeVarUint(validateKeyEncoder, messageValidateKey)
+        encoding.writeVarString(validateKeyEncoder, provider.cryptor.validateKey)
+        websocket.send(encoding.toUint8Array(validateKeyEncoder))
+
+        // always send sync step 1 when connected
         const encoder = encoding.createEncoder()
         encoding.writeVarUint(encoder, messageSync)
         syncProtocol.writeSyncStep1(encoder, provider.doc)
         const encrypted = provider.encryptInner(encoder)
         websocket.send(encoding.toUint8Array(encrypted))
-      }
-      // broadcast local awareness state
-      if (provider.awareness.getLocalState() !== null && provider.canEncrypt) {
-        const encoderAwarenessState = encoding.createEncoder()
-        encoding.writeVarUint(encoderAwarenessState, messageAwareness)
-        encoding.writeVarUint8Array(
-          encoderAwarenessState,
-          awarenessProtocol.encodeAwarenessUpdate(provider.awareness, [
-            provider.doc.clientID
-          ])
-        )
 
-        const encrypted = provider.encryptInner( encoderAwarenessState )
-        websocket.send(encoding.toUint8Array(encrypted))
+        // broadcast local awareness state
+        if (provider.awareness.getLocalState() !== null) {
+          const encoderAwarenessState = encoding.createEncoder()
+          encoding.writeVarUint(encoderAwarenessState, messageAwareness)
+          encoding.writeVarUint8Array(
+            encoderAwarenessState,
+            awarenessProtocol.encodeAwarenessUpdate(provider.awareness, [
+              provider.doc.clientID
+            ])
+          )
+
+          const encrypted = provider.encryptInner( encoderAwarenessState )
+          websocket.send(encoding.toUint8Array(encrypted))
+        }
       }
     }
 

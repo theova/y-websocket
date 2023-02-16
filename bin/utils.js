@@ -13,6 +13,8 @@ const debounce = require('lodash.debounce')
 const callbackHandler = require('./callback.js').callbackHandler
 const isCallbackSet = require('./callback.js').isCallbackSet
 
+const Crypto = require('chainpad-crypto')
+
 const CALLBACK_DEBOUNCE_WAIT = parseInt(process.env.CALLBACK_DEBOUNCE_WAIT) || 2000
 const CALLBACK_DEBOUNCE_MAXWAIT = parseInt(process.env.CALLBACK_DEBOUNCE_MAXWAIT) || 10000
 
@@ -20,6 +22,8 @@ const wsReadyStateConnecting = 0
 const wsReadyStateOpen = 1
 const wsReadyStateClosing = 2 // eslint-disable-line
 const wsReadyStateClosed = 3 // eslint-disable-line
+
+
 
 // disable gc when using snapshots!
 const gcEnabled = process.env.GC !== 'false' && process.env.GC !== '0'
@@ -38,14 +42,25 @@ if (typeof persistenceDir === 'string') {
       var file = fs.createWriteStream(filepath)
       file.write(serializeHistory(ydoc.messageHistory))
       file.end()
+
+      if (ydoc.validateKey) {
+        const fileMD = fs.createWriteStream(filepath + ".metadata")
+        fileMD.write(/*Buffer.from(*/ydoc.validateKey/*).toString('base64')*/)
+        fileMD.end()
+      }
     },
     readState: (docName) => {
+      var result = {}
       const filepath= persistenceDir +"/" + docName
-      console.log("📄 Read from disk " + filepath)
       if (fs.existsSync(filepath)) {
-        return deserializeHistory(fs.readFileSync(filepath))
+        console.log("📄 Read from disk " + filepath)
+        result.history =  deserializeHistory(fs.readFileSync(filepath))
       }
-      return null
+      if (fs.existsSync(filepath + ".metadata")) {
+        const metadata =  fs.readFileSync(filepath + ".metadata")
+        result.metadata = metadata //new Uint8Array(Buffer.from(metadata, "base64"))I
+      }
+      return result
     }
   }
 }
@@ -106,9 +121,16 @@ exports.docs = docs
 
 const messageSync = 0
 const messageAwareness = 1
+const messageValidateKey = 11 // inner type for the validateKey
 const messageCrypto = 100 // outer type for general encrypted updates
 const messageAwarenessCrypto = 101 // outer type for encrypted awareness
 const messageFullCrypto = 110 // outer type for encrypted ful updates
+
+const messageTypesCrypto = [
+  messageCrypto,
+  messageAwarenessCrypto,
+  messageFullCrypto
+]
 // const messageAuth = 2
 //
 
@@ -192,9 +214,12 @@ const getYDoc = (docname, gc = true) => map.setIfUndefined(docs, docname, () => 
   const doc = new WSSharedDoc(docname)
   doc.gc = gc
   if (persistence !== null) {
-    const messageHistory = persistence.readState(docname)
-    if (messageHistory) { // check if we could read the state from disk
-      doc.messageHistory = messageHistory
+    const data = persistence.readState(docname)
+    if (data.history) { // check if we could read the state from disk
+      doc.messageHistory = data.history
+    }
+    if (data.metadata) { // check if we could read the state from disk
+      doc.validateKey = data.metadata
     }
   }
   docs.set(docname, doc)
@@ -202,6 +227,34 @@ const getYDoc = (docname, gc = true) => map.setIfUndefined(docs, docname, () => 
 })
 
 exports.getYDoc = getYDoc
+
+/**
+ * @param {Uint8Array} message
+ * @return {Uint8Array}
+ */
+const checkAndRemoveSignature = (message, validateKey) => {
+  if(!validateKey){
+    return new Uint8Array()
+  }
+
+  const decoder = decoding.createDecoder(message)
+  const OuterMessageType = decoding.readVarUint(decoder)
+  const signedCiphertext = decoding.readTailAsUint8Array(decoder)
+
+  const ciphertext = Crypto.Nacl.sign.open(signedCiphertext, validateKey)
+
+  if (!ciphertext) {
+    console.error("Could not validate signature:")
+    return new Uint8Array()
+  }
+
+  // const encoded = Crypto.Nacl.util.encodeUTF8(ciphertext)
+  const encoder = encoding.createEncoder()
+  encoding.writeVarUint(encoder, OuterMessageType)
+  encoding.writeVarUint8Array(encoder, ciphertext)
+
+  return encoding.toUint8Array(encoder)
+}
 
 /**
  * @param {any} conn
@@ -213,10 +266,28 @@ const messageListener = (conn, doc, message) => {
     const encoder = encoding.createEncoder()
     const decoder = decoding.createDecoder(message)
     const messageType = decoding.readVarUint(decoder)
+
+    // if it is encrypted, then we need to decrypt it
+    if (messageTypesCrypto.indexOf(messageType) >= 0) {
+        // console.log("🔍️ Check signature")
+        message = checkAndRemoveSignature(message, doc.validateKey)
+
+        if(message.length === 0) {
+          return
+        }
+    }
+
     switch (messageType) {
-      // If we get the encrypted full state, then reset the history
-      // Todo: The server should check if this is value or not
+      case messageValidateKey:
+        if (!doc.validateKey){
+          console.log("🔑 Store validate Key")
+          const validateKey = decoding.readVarString(decoder)
+          doc.validateKey = Crypto.Nacl.util.decodeBase64(validateKey)
+        }
+        break
+
       case messageFullCrypto:
+        // If we get the encrypted full state, then reset the history
         console.log("📜 Get full update")
         doc.messageHistory = []
         // no break to read it as normal encrypted message!
