@@ -400,9 +400,17 @@ export class WebsocketProvider extends Observable {
      */
     this._bcSubscriber = (data, origin) => {
       if (origin !== this) {
+        try{
         const encoder = readMessage(this, new Uint8Array(data), false)
         if (encoding.length(encoder) > 1) {
           bc.publish(this.bcChannel, encoding.toUint8Array(encoder), this)
+        }
+        } catch (error) {
+          if (error instanceof URIError || error instanceof RangeError) {
+            /* pass */
+          } else {
+            throw error
+          }
         }
       }
     }
